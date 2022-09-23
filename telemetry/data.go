@@ -60,8 +60,18 @@ func generateTelemetryData(sctx sessionctx.Context, trackingID string) telemetry
 func postReportTelemetryData() {
 	postReportTxnUsage()
 	postReportCTEUsage()
+	postReportAccountLockUsage()
 	postReportMultiSchemaChangeUsage()
+	postReportExchangePartitionUsage()
+	postReportTablePartitionUsage()
 	postReportSlowQueryStats()
 	postReportNonTransactionalCounter()
 	PostSavepointCount()
+	postReportLazyPessimisticUniqueCheckSetCount()
+	postReportDDLUsage()
+}
+
+// PostReportTelemetryDataForTest is for test.
+func PostReportTelemetryDataForTest() {
+	postReportTablePartitionUsage()
 }

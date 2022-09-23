@@ -27,6 +27,7 @@ go_test(
         "decoder_test.go",
         "main_test.go",
     ],
+    flaky = True,
     deps = [
         ":rowDecoder",
         "//expression",
@@ -44,6 +45,7 @@ go_test(
         "//util/mock",
         "//util/rowcodec",
         "@com_github_stretchr_testify//require",
+        "@io_opencensus_go//stats/view",
         "@org_uber_go_goleak//:goleak",
     ],
 )

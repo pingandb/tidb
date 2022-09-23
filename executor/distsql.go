@@ -42,6 +42,7 @@ import (
 	"github.com/pingcap/tidb/tablecodec"
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util"
+	"github.com/pingcap/tidb/util/channel"
 	"github.com/pingcap/tidb/util/chunk"
 	"github.com/pingcap/tidb/util/codec"
 	"github.com/pingcap/tidb/util/collate"
@@ -53,6 +54,7 @@ import (
 	"github.com/pingcap/tidb/util/ranger"
 	"github.com/pingcap/tipb/go-tipb"
 	"go.uber.org/zap"
+	"golang.org/x/exp/slices"
 )
 
 var (
@@ -140,7 +142,7 @@ func closeAll(objs ...Closeable) error {
 }
 
 // rebuildIndexRanges will be called if there's correlated column in access conditions. We will rebuild the range
-// by substitute correlated column with the constant.
+// by substituting correlated column with the constant.
 func rebuildIndexRanges(ctx sessionctx.Context, is *plannercore.PhysicalIndexScan, idxCols []*expression.Column, colLens []int) (ranges []*ranger.Range, err error) {
 	access := make([]expression.Expression, 0, len(is.AccessCondition))
 	for _, cond := range is.AccessCondition {
@@ -150,7 +152,8 @@ func rebuildIndexRanges(ctx sessionctx.Context, is *plannercore.PhysicalIndexSca
 		}
 		access = append(access, newCond)
 	}
-	ranges, _, err = ranger.DetachSimpleCondAndBuildRangeForIndex(ctx, access, idxCols, colLens)
+	// All of access conditions must be used to build ranges, so we don't limit range memory usage.
+	ranges, _, err = ranger.DetachSimpleCondAndBuildRangeForIndex(ctx, access, idxCols, colLens, 0)
 	return ranges, err
 }
 
@@ -304,6 +307,9 @@ func (e *IndexReaderExecutor) open(ctx context.Context, kvRanges []kv.KeyRange) 
 
 	e.memTracker = memory.NewTracker(e.id, -1)
 	e.memTracker.AttachTo(e.ctx.GetSessionVars().StmtCtx.MemTracker)
+	slices.SortFunc(kvRanges, func(i, j kv.KeyRange) bool {
+		return bytes.Compare(i.StartKey, j.StartKey) < 0
+	})
 	var builder distsql.RequestBuilder
 	builder.SetKeyRanges(kvRanges).
 		SetDAGRequest(e.dagPB).
@@ -612,6 +618,10 @@ func (e *IndexLookUpExecutor) startIndexWorker(ctx context.Context, workCh chan<
 			}
 
 			// init kvReq, result and worker for this partition
+			// The key ranges should be ordered.
+			slices.SortFunc(kvRange, func(i, j kv.KeyRange) bool {
+				return bytes.Compare(i.StartKey, j.StartKey) < 0
+			})
 			kvReq, err := builder.SetKeyRanges(kvRange).Build()
 			if err != nil {
 				worker.syncErr(err)
@@ -724,8 +734,7 @@ func (e *IndexLookUpExecutor) Close() error {
 	close(e.finished)
 	// Drain the resultCh and discard the result, in case that Next() doesn't fully
 	// consume the data, background worker still writing to resultCh and block forever.
-	for range e.resultCh {
-	}
+	channel.Clear(e.resultCh)
 	e.idxWorkerWg.Wait()
 	e.tblWorkerWg.Wait()
 	e.finished = nil
