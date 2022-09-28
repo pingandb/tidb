@@ -428,6 +428,11 @@ const (
 	CreateMDLView = `CREATE OR REPLACE VIEW mysql.tidb_mdl_view as (
 	select JOB_ID, DB_NAME, TABLE_NAME, QUERY, SESSION_ID, TxnStart, TIDB_DECODE_SQL_DIGESTS(ALL_SQL_DIGESTS, 4096) AS SQL_DIGESTS from information_schema.ddl_jobs, information_schema.CLUSTER_TIDB_TRX, information_schema.CLUSTER_PROCESSLIST where ddl_jobs.STATE = 'running' and find_in_set(ddl_jobs.table_id, CLUSTER_TIDB_TRX.RELATED_TABLE_IDS) and CLUSTER_TIDB_TRX.SESSION_ID=CLUSTER_PROCESSLIST.ID
 	);`
+	// CreateStatsTableLocked stores the locked tables
+	CreateStatsTableLocked = `CREATE TABLE IF NOT EXISTS mysql.stats_table_locked(
+		table_id bigint(64) NOT NULL,
+		PRIMARY KEY (table_id)
+	);`
 )
 
 // bootstrap initiates system DB for a store.
@@ -632,11 +637,13 @@ const (
 	// version93 converts oom-use-tmp-storage to a sysvar
 	version93 = 93
 	version94 = 94
+	// version95 adds the tables mysql.stats_table_locked
+	version95 = 95
 )
 
 // currentBootstrapVersion is defined as a variable, so we can modify its value for testing.
 // please make sure this is the largest version
-var currentBootstrapVersion int64 = version94
+var currentBootstrapVersion int64 = version95
 
 // DDL owner key's expired time is ManagerSessionTTL seconds, we should wait the time and give more time to have a chance to finish it.
 var internalSQLTimeout = owner.ManagerSessionTTL + 15
@@ -736,6 +743,7 @@ var (
 		upgradeToVer91,
 		upgradeToVer93,
 		upgradeToVer94,
+		upgradeToVer95,
 	}
 )
 
@@ -1931,6 +1939,13 @@ func upgradeToVer94(s Session, ver int64) {
 	mustExecute(s, CreateMDLView)
 }
 
+func upgradeToVer95(s Session, ver int64) {
+	if ver >= version95 {
+		return
+	}
+	doReentrantDDL(s, CreateStatsTableLocked)
+}
+
 func writeOOMAction(s Session) {
 	comment := "oom-action is `log` by default in v3.0.x, `cancel` by default in v4.0.11+"
 	mustExecute(s, `INSERT HIGH_PRIORITY INTO %n.%n VALUES (%?, %?, %?) ON DUPLICATE KEY UPDATE VARIABLE_VALUE= %?`,
@@ -2027,6 +2042,8 @@ func doDDLWorks(s Session) {
 	mustExecute(s, CreateAdvisoryLocks)
 	// Create mdl view.
 	mustExecute(s, CreateMDLView)
+	// Create stats_meta_table_locked table
+	mustExecute(s, CreateStatsTableLocked)
 }
 
 // inTestSuite checks if we are bootstrapping in the context of tests.

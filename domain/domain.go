@@ -1714,6 +1714,7 @@ func (do *Domain) updateStatsWorker(ctx sessionctx.Context, owner owner.Manager)
 	gcStatsTicker := time.NewTicker(100 * lease)
 	dumpFeedbackTicker := time.NewTicker(200 * lease)
 	loadFeedbackTicker := time.NewTicker(5 * lease)
+	loadLockedTablesTicker := time.NewTicker(5 * lease)
 	dumpColStatsUsageTicker := time.NewTicker(100 * lease)
 	statsHandle := do.StatsHandle()
 	defer func() {
@@ -1751,6 +1752,11 @@ func (do *Domain) updateStatsWorker(ctx sessionctx.Context, owner owner.Manager)
 			err := statsHandle.HandleUpdateStats(do.InfoSchema())
 			if err != nil {
 				logutil.BgLogger().Debug("update stats using feedback failed", zap.Error(err))
+			}
+		case <-loadLockedTablesTicker.C:
+			err := statsHandle.LoadLockedTables()
+			if err != nil {
+				logutil.BgLogger().Debug("load locked table failed", zap.Error(err))
 			}
 		case <-dumpFeedbackTicker.C:
 			err := statsHandle.DumpStatsFeedbackToKV()

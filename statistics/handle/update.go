@@ -168,6 +168,9 @@ type SessionStatsCollector struct {
 	next     *SessionStatsCollector
 	// deleted is set to true when a session is closed. Every time we sweep the list, we will remove the useless collector.
 	deleted bool
+
+	// tableLocked used to store locked tables
+	tableLocked []int64
 }
 
 // Delete only sets the deleted flag true, it will be deleted from list when DumpStatsDeltaToKV is called.
@@ -181,7 +184,10 @@ func (s *SessionStatsCollector) Delete() {
 func (s *SessionStatsCollector) Update(id int64, delta int64, count int64, colSize *map[int64]int64) {
 	s.Lock()
 	defer s.Unlock()
-	s.mapper.update(id, delta, count, colSize)
+	// if table locked, skip
+	if !isTableLocked(s.tableLocked, id) {
+		s.mapper.update(id, delta, count, colSize)
+	}
 }
 
 var (
@@ -197,6 +203,12 @@ func (s *SessionStatsCollector) StoreQueryFeedback(feedback interface{}, h *Hand
 	if !q.Valid.Load() || q.Hist == nil {
 		return nil
 	}
+
+	// if table locked, skip
+	if isTableLocked(s.tableLocked, q.PhysicalID) {
+		return nil
+	}
+
 	err := h.RecalculateExpectCount(q, enablePseudoForOutdatedStats)
 	if err != nil {
 		return errors.Trace(err)
@@ -224,19 +236,31 @@ func (s *SessionStatsCollector) StoreQueryFeedback(feedback interface{}, h *Hand
 func (s *SessionStatsCollector) UpdateColStatsUsage(colMap colStatsUsageMap) {
 	s.Lock()
 	defer s.Unlock()
-	s.colMap.merge(colMap)
+	newMap := make(colStatsUsageMap)
+	for k, v := range colMap {
+		// if table locked, skip
+		if isTableLocked(s.tableLocked, k.TableID) {
+			continue
+		}
+		newMap[k] = v
+	}
+	s.colMap.merge(newMap)
 }
 
 // NewSessionStatsCollector allocates a stats collector for a session.
 func (h *Handle) NewSessionStatsCollector() *SessionStatsCollector {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
 	h.listHead.Lock()
 	defer h.listHead.Unlock()
 	newCollector := &SessionStatsCollector{
-		mapper:   make(tableDeltaMap),
-		rateMap:  make(errorRateDeltaMap),
-		next:     h.listHead.next,
-		feedback: statistics.NewQueryFeedbackMap(),
-		colMap:   make(colStatsUsageMap),
+		mapper:      make(tableDeltaMap),
+		rateMap:     make(errorRateDeltaMap),
+		next:        h.listHead.next,
+		feedback:    statistics.NewQueryFeedbackMap(),
+		colMap:      make(colStatsUsageMap),
+		tableLocked: h.tableLocked,
 	}
 	h.listHead.next = newCollector
 	return newCollector
@@ -264,6 +288,8 @@ type SessionIndexUsageCollector struct {
 	mapper  indexUsageMap
 	next    *SessionIndexUsageCollector
 	deleted bool
+	// tableLocked used to store locked tables
+	tableLocked []int64
 }
 
 func (m indexUsageMap) updateByKey(id GlobalIndexID, value *IndexUsageInformation) {
@@ -293,6 +319,11 @@ func (s *SessionIndexUsageCollector) Update(tableID int64, indexID int64, value 
 	value.LastUsedAt = time.Now().Format(types.TimeFSPFormat)
 	s.Lock()
 	defer s.Unlock()
+
+	// if table locked, skip
+	if isTableLocked(s.tableLocked, tableID) {
+		return
+	}
 	s.mapper.update(tableID, indexID, value)
 }
 
@@ -307,11 +338,14 @@ func (s *SessionIndexUsageCollector) Delete() {
 // idxUsageListHead always points to an empty SessionIndexUsageCollector as a sentinel node. So we let idxUsageListHead.next
 // points to new item. It's helpful to sweepIdxUsageList.
 func (h *Handle) NewSessionIndexUsageCollector() *SessionIndexUsageCollector {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	h.idxUsageListHead.Lock()
 	defer h.idxUsageListHead.Unlock()
 	newCollector := &SessionIndexUsageCollector{
-		mapper: make(indexUsageMap),
-		next:   h.idxUsageListHead.next,
+		mapper:      make(indexUsageMap),
+		next:        h.idxUsageListHead.next,
+		tableLocked: h.tableLocked,
 	}
 	h.idxUsageListHead.next = newCollector
 	return newCollector
@@ -1088,6 +1122,10 @@ func (h *Handle) HandleAutoAnalyze(is infoschema.InfoSchema) (analyzed bool) {
 			tbls[i], tbls[j] = tbls[j], tbls[i]
 		})
 		for _, tbl := range tbls {
+			//if table locked, skip analyze
+			if h.IsTableLocked(tbl.Meta().ID) {
+				continue
+			}
 			tblInfo := tbl.Meta()
 			if tblInfo.IsView() {
 				continue

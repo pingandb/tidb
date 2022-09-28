@@ -81,19 +81,45 @@ const (
 
 // Next implements the Executor Next interface.
 func (e *AnalyzeExec) Next(ctx context.Context, _ *chunk.Chunk) error {
+	statsHandle := domain.GetDomain(e.ctx).StatsHandle()
+	var tasks []*analyzeTask
+	for _, task := range e.tasks {
+		var tableID statistics.AnalyzeTableID
+		switch task.taskType {
+		case colTask:
+			tableID = task.colExec.tableID
+		case idxTask:
+			tableID = task.idxExec.tableID
+		case fastTask:
+			tableID = task.fastExec.tableID
+		case pkIncrementalTask:
+			tableID = task.colIncrementalExec.tableID
+		case idxIncrementalTask:
+			tableID = task.idxIncrementalExec.tableID
+		}
+		// skip locked tables
+		if !statsHandle.IsTableLocked(tableID.TableID) {
+			tasks = append(tasks, task)
+		}
+	}
+
+	if len(tasks) == 0 {
+		return nil
+	}
+
 	concurrency, err := getBuildStatsConcurrency(e.ctx)
 	if err != nil {
 		return err
 	}
-	taskCh := make(chan *analyzeTask, len(e.tasks))
-	resultsCh := make(chan *statistics.AnalyzeResults, len(e.tasks))
-	if len(e.tasks) < concurrency {
-		concurrency = len(e.tasks)
+	taskCh := make(chan *analyzeTask, len(tasks))
+	resultsCh := make(chan *statistics.AnalyzeResults, len(tasks))
+	if len(tasks) < concurrency {
+		concurrency = len(tasks)
 	}
 	for i := 0; i < concurrency; i++ {
 		e.wg.Run(func() { e.analyzeWorker(taskCh, resultsCh) })
 	}
-	for _, task := range e.tasks {
+	for _, task := range tasks {
 		prepareV2AnalyzeJobInfo(task.colExec, false)
 		AddNewAnalyzeJob(e.ctx, task.job)
 	}
@@ -101,7 +127,7 @@ func (e *AnalyzeExec) Next(ctx context.Context, _ *chunk.Chunk) error {
 		dom := domain.GetDomain(e.ctx)
 		dom.SysProcTracker().KillSysProcess(util.GetAutoAnalyzeProcID(dom.ServerID))
 	})
-	for _, task := range e.tasks {
+	for _, task := range tasks {
 		taskCh <- task
 	}
 	close(taskCh)
@@ -112,7 +138,7 @@ func (e *AnalyzeExec) Next(ctx context.Context, _ *chunk.Chunk) error {
 	needGlobalStats := pruneMode == variable.Dynamic
 	globalStatsMap := make(map[globalStatsKey]globalStatsInfo)
 	err = e.handleResultsError(ctx, concurrency, needGlobalStats, globalStatsMap, resultsCh)
-	for _, task := range e.tasks {
+	for _, task := range tasks {
 		if task.colExec != nil && task.colExec.memTracker != nil {
 			task.colExec.memTracker.Detach()
 		}
@@ -134,7 +160,6 @@ func (e *AnalyzeExec) Next(ctx context.Context, _ *chunk.Chunk) error {
 	if err != nil {
 		e.ctx.GetSessionVars().StmtCtx.AppendWarning(err)
 	}
-	statsHandle := domain.GetDomain(e.ctx).StatsHandle()
 	if e.ctx.GetSessionVars().InRestrictedSQL {
 		return statsHandle.Update(e.ctx.GetInfoSchema().(infoschema.InfoSchema))
 	}
