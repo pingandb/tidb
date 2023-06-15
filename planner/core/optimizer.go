@@ -1129,6 +1129,10 @@ func physicalOptimize(logic LogicalPlan, planCounter *PlanCounterTp) (plan Physi
 		}
 		opt = opt.withEnableOptimizeTracer(tracer)
 		defer func() {
+			r := recover()
+			if r != nil {
+				panic(r) /* pass panic to upper function to handle */
+			}
 			if err == nil {
 				tracer.RecordFinalPlanTrace(plan.buildPlanTrace())
 				stmtCtx.OptimizeTracer.Physical = tracer

@@ -138,7 +138,7 @@ func GetPropByOrderByItemsContainScalarFunc(items []*util.ByItems) (*property.Ph
 	return &property.PhysicalProperty{SortItems: propItems}, true, onlyColumn
 }
 
-func (p *LogicalTableDual) findBestTask(prop *property.PhysicalProperty, planCounter *PlanCounterTp, _ *physicalOptimizeOp) (task, int64, error) {
+func (p *LogicalTableDual) findBestTask(prop *property.PhysicalProperty, planCounter *PlanCounterTp, opt *physicalOptimizeOp) (task, int64, error) {
 	// If the required property is not empty and the row count > 1,
 	// we cannot ensure this required property.
 	// But if the row count is 0 or 1, we don't need to care about the property.
@@ -150,6 +150,7 @@ func (p *LogicalTableDual) findBestTask(prop *property.PhysicalProperty, planCou
 	}.Init(p.ctx, p.stats, p.blockOffset)
 	dual.SetSchema(p.schema)
 	planCounter.Dec(1)
+	opt.appendCandidate(p, dual, prop)
 	return &rootTask{p: dual, isEmpty: p.RowCount == 0}, 1, nil
 }
 
@@ -368,6 +369,35 @@ func (op *physicalOptimizeOp) appendCandidate(lp LogicalPlan, pp PhysicalPlan, p
 			ExplainInfo: pp.ExplainInfo(), ProperType: prop.String()},
 		MappingLogicalPlan: tracing.CodecPlanName(lp.TP(), lp.ID())}
 	op.tracer.AppendCandidate(candidate)
+
+	// for PhysicalIndexMergeJoin/PhysicalIndexHashJoin/PhysicalIndexJoin, it will use innerTask as a child instead of calling findBestTask,
+	// and innerTask.plan() will be appended to planTree in appendChildCandidate using empty MappingLogicalPlan field, so it won't mapping with the logic plan,
+	// that will cause no physical plan when the logic plan got selected.
+	// the fix to add innerTask.plan() to planTree and mapping correct logic plan
+	index := -1
+	var plan PhysicalPlan
+	switch pp.(type) {
+	case *PhysicalIndexMergeJoin:
+		join := pp.(*PhysicalIndexMergeJoin)
+		index = join.InnerChildIdx
+		plan = join.innerTask.plan()
+	case *PhysicalIndexHashJoin:
+		join := pp.(*PhysicalIndexHashJoin)
+		index = join.InnerChildIdx
+		plan = join.innerTask.plan()
+	case *PhysicalIndexJoin:
+		join := pp.(*PhysicalIndexJoin)
+		index = join.InnerChildIdx
+		plan = join.innerTask.plan()
+	}
+	if index != -1 {
+		child := lp.(*baseLogicalPlan).children[index]
+		candidate := &tracing.CandidatePlanTrace{
+			PlanTrace: &tracing.PlanTrace{TP: plan.TP(), ID: plan.ID(), Cost: plan.Cost(),
+			        ExplainInfo: plan.ExplainInfo(), ProperType: prop.String()},
+			MappingLogicalPlan: tracing.CodecPlanName(child.TP(), child.ID())}
+	        op.tracer.AppendCandidate(candidate)
+	}
 	pp.appendChildCandidate(op)
 }
 
@@ -893,6 +923,9 @@ func (ds *DataSource) findBestTask(prop *property.PhysicalProperty, planCounter 
 	t, err = ds.tryToGetDualTask()
 	if err != nil || t != nil {
 		planCounter.Dec(1)
+		if t != nil {
+			appendCandidate(ds, t, prop, opt)
+		}
 		return t, 1, err
 	}
 
@@ -946,9 +979,11 @@ func (ds *DataSource) findBestTask(prop *property.PhysicalProperty, planCounter 
 			dual.SetSchema(ds.schema)
 			cntPlan++
 			planCounter.Dec(1)
-			return &rootTask{
+			t := &rootTask{
 				p: dual,
-			}, cntPlan, nil
+			}
+			appendCandidate(ds, t, prop, opt)
+			return t, cntPlan, nil
 		}
 
 		canConvertPointGet := len(path.Ranges) > 0 && path.StoreType == kv.TiKV && ds.isPointGetConvertableSchema()

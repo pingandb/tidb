@@ -30,6 +30,9 @@ func TestCostModelTraceNew(t *testing.T) {
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
 	tk.MustExec(`create table t (a int primary key, b int, c int, key(b), INDEX idx_b(b))`)
+	tk.MustExec(`create table t1 (a int primary key, b int, c int, key(b), INDEX idx_b(b))`)
+	tk.MustExec(`create table t2 (a int primary key, b int, c int, key(b), INDEX idx_b(b))`)
+	tk.MustExec(`create table t3 (a int primary key, b int, c int, key(b), INDEX idx_b(b))`)
 	vals := make([]string, 0, 10)
 	for i := 0; i < 10; i++ {
 		vals = append(vals, fmt.Sprintf("(%v, %v, %v)", i, i, i))
@@ -61,12 +64,9 @@ func TestCostModelTraceNew(t *testing.T) {
 		"select /*+ inl_hash_join(t1, t2) */ * from t t1, t t2 where t1.b=t2.b",
 		"select /*+ hash_agg()*/count(*) from t where a<4 group by b, c",
 		"select /*+ stream_agg()*/count(*) from t where a<4 group by b, c",
+		"select (2) in (select /*+ read_from_storage(tiflash[t1]) */ count(*) from t1) from (select t.b < (select /*+ read_from_storage(tiflash[t2]) */ t.b from t2 limit 1) from t3 t) t",
 	} {
-		//plan := tk.MustQuery(q).Rows()
 		plan := tk.MustQuery("explain analyze format='true_card_cost' " + q).Rows()
-		fmt.Printf("================%v\n", plan)
-		//planCost, err := strconv.ParseFloat(plan[0][2].(string), 64)
-		//require.Nil(t, err)
 
 		// check whether cost mismatch
 		ok := true
@@ -74,7 +74,6 @@ func TestCostModelTraceNew(t *testing.T) {
 		for _, warn := range warns {
 			msg := warn[2].(string)
 			if strings.HasPrefix(msg, "cost mismatch: ") {
-				fmt.Printf("========%v\n", msg)
 				ok = false
 			}
 		}

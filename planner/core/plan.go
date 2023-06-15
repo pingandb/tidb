@@ -435,12 +435,14 @@ func (op *PlanCostOption) WithCostFlag(flag uint64) *PlanCostOption {
 }
 
 // WithOptimizeTracer set tracer
-func (op *PlanCostOption) WithOptimizeTracer(tracer *physicalOptimizeOp) *PlanCostOption {
+func (op *PlanCostOption) WithOptimizeTracer(v *physicalOptimizeOp) *PlanCostOption {
 	if op == nil {
 		return nil
 	}
-	op.tracer = tracer
-	op.CostFlag |= CostFlagTrace
+	op.tracer = v
+	if v != nil && v.tracer != nil {
+		op.CostFlag |= CostFlagTrace
+	}
 	return op
 }
 
@@ -907,7 +909,14 @@ func (p *basePlan) SCtx() sessionctx.Context {
 
 // buildPlanTrace implements Plan
 func (p *basePhysicalPlan) buildPlanTrace() *tracing.PlanTrace {
-	planTrace := &tracing.PlanTrace{ID: p.ID(), TP: p.self.TP(), Cost: p.Cost(), ExplainInfo: p.self.ExplainInfo()}
+	tp := ""
+	info := ""
+	if p.self != nil {
+		tp = p.self.TP()
+		info = p.self.ExplainInfo()
+	}
+
+	planTrace := &tracing.PlanTrace{ID: p.ID(), TP: tp, Cost: p.Cost(), ExplainInfo: info}
 	for _, child := range p.Children() {
 		planTrace.Children = append(planTrace.Children, child.buildPlanTrace())
 	}
